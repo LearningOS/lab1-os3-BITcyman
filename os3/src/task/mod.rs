@@ -4,11 +4,12 @@ mod context;
 #[allow(clippy::module_inception)]
 mod task;
 
-use crate::config::MAX_APP_NUM;
+use crate::config::{MAX_APP_NUM, MAX_SYSCALL_NUM};
 use crate::loader::{get_num_app, init_app_cx};
 use crate::sync::UPSafeCell;
+use crate::timer::get_time_us;
 
-use task::{TaskControlBlock, TaskStatus};
+pub use task::{TaskControlBlock, TaskStatus};
 use switch::__switch;
 use context::TaskContext;
 
@@ -27,6 +28,11 @@ struct TaskManagerInner{
     current_task: usize,
 }
 
+pub struct TaskInfo {
+    status: TaskStatus,
+    syscall_times: [u32; MAX_SYSCALL_NUM],
+    time: usize
+}
 
 lazy_static!{
     pub static ref TASK_MANAGER: TaskManager = {
@@ -34,7 +40,9 @@ lazy_static!{
         let mut tasks = [
             TaskControlBlock{
                 task_cx: TaskContext::zero_init(),
-                task_status: TaskStatus::UnInit
+                task_status: TaskStatus::UnInit,
+                task_start_time: 0,
+                task_syscall_times: [0;MAX_SYSCALL_NUM],
             };
             MAX_APP_NUM
         ];
@@ -67,6 +75,21 @@ pub fn run_first_task(){
     TASK_MANAGER.run_first_task();
 }
 
+pub fn increase_syscall_time(syscall_id: usize){
+    TASK_MANAGER.increase_syscall_time(syscall_id);
+}
+
+pub fn get_task_info(ti: *mut TaskInfo)->isize{
+    if TASK_MANAGER.get_task_info(ti) == 0{
+        return 0
+    }
+    return -1
+
+}
+
+
+
+
 fn mark_current_suspended(){
     TASK_MANAGER.mark_current_suspended();
 }
@@ -97,6 +120,9 @@ impl TaskManager{
             let mut inner = self.inner.exclusive_access();
             let current = inner.current_task;
             inner.tasks[next].task_status = TaskStatus::Running;
+            if inner.tasks[next].task_start_time==0 {
+                inner.tasks[next].task_start_time = get_time_us();
+            }
             inner.current_task = next;
             let current_task_cx_ptr = &mut inner.tasks[current].task_cx as *mut TaskContext;
             let next_task_cx_ptr = &inner.tasks[next].task_cx as *const TaskContext;
@@ -114,6 +140,7 @@ impl TaskManager{
         let mut inner = self.inner.exclusive_access();
         let task0 = &mut inner.tasks[0];
         task0.task_status = TaskStatus::Running;
+        task0.task_start_time = get_time_us();
         let next_task_cx_ptr = &task0.task_cx as *const TaskContext;
         drop(inner);
 
@@ -135,5 +162,29 @@ impl TaskManager{
             .find(|id|{
                 inner.tasks[*id].task_status == TaskStatus::Ready
             })
+    }
+
+    fn increase_syscall_time(&self, syscall_id: usize){
+        let mut inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        inner.tasks[current].task_syscall_times[syscall_id] +=1;
+        drop(inner);
+    }
+
+    fn get_task_info(&self, ti:*mut TaskInfo) -> isize{
+        let inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        let task_start_time = inner.tasks[current].task_start_time;
+        let syscall_times = inner.tasks[current].task_syscall_times;
+        drop(inner);
+        unsafe{
+            *ti = TaskInfo{
+                status: TaskStatus::Running,
+                syscall_times,
+                time: (get_time_us() - task_start_time)/1000,
+            }
+        };
+        
+        return 0
     }
 }

@@ -1,11 +1,12 @@
 mod context;
 
-use crate::task::exit_current_and_run_next;
+use crate::task::{exit_current_and_run_next, suspend_current_and_run_next, increase_syscall_time};
 use crate::syscall::syscall;
+use crate::timer::set_next_trigger;
 use riscv::register::{
     mtvec::TrapMode,
-    scause::{self, Exception, Trap},
-    stval, stvec,
+    scause::{self, Exception, Interrupt, Trap},
+    sie, stval, stvec,
 };
 
 core::arch::global_asm!(include_str!("trap.S"));
@@ -25,6 +26,7 @@ pub fn trap_handler(cx: &mut TrapContext) -> &mut TrapContext {
     let stval = stval::read();
     match scause.cause() {
         Trap::Exception(Exception::UserEnvCall) => {
+            increase_syscall_time(cx.x[17]);
             cx.sepc += 4;
             cx.x[10] = syscall(cx.x[17], [cx.x[10], cx.x[11], cx.x[12]]) as usize;
         }
@@ -36,6 +38,10 @@ pub fn trap_handler(cx: &mut TrapContext) -> &mut TrapContext {
             error!("[kernel] IllegalInstruction in application, core dumped.");
             exit_current_and_run_next();
         }
+        Trap::Interrupt(Interrupt::SupervisorTimer) => {
+            set_next_trigger();
+            suspend_current_and_run_next();
+        }
         _ => {
             panic!(
                 "Unsupported trap {:?}, stval = {:#x}!",
@@ -45,6 +51,10 @@ pub fn trap_handler(cx: &mut TrapContext) -> &mut TrapContext {
         }
     }
     cx
+}
+
+pub fn enable_timer_interrupt() {
+    unsafe { sie::set_stimer(); }
 }
 
 pub use context::TrapContext;
